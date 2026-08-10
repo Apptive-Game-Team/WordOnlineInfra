@@ -11,7 +11,7 @@ filled files exist on the server only.
 
 | Path | What |
 |------|------|
-| `game/` | Blue/green deployer for the game server — see [game/README.md](game/README.md) |
+| `game/` | Blue/green deployer for the game server, `ac-game` and `dev-game` — see [game/README.md](game/README.md) |
 | `env/` | Example environment files, key names only |
 
 ## Images

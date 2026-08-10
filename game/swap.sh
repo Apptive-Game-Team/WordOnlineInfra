@@ -45,7 +45,10 @@ DRAIN_TIMEOUT="${DRAIN_TIMEOUT:-3600}"    # seconds to wait for matches to end
 STOP_GRACE="${STOP_GRACE:-30}"            # SIGTERM grace when drain overruns
 DISCORD_WEBHOOK_URL="${DISCORD_WEBHOOK_URL:-}"
 
-GAME_LABEL="wordonline.role=game"
+# Identifies the containers this deployer owns. Every environment on the host
+# needs its own value, otherwise one deployer treats the other's slots as its
+# own and drains them.
+GAME_LABEL="${GAME_LABEL:-wordonline.role=game}"
 
 log() {
     printf '%s [swap] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*"
@@ -59,10 +62,10 @@ notify() {
         "$DISCORD_WEBHOOK_URL" >/dev/null || true
 }
 
-# Currently running game slot, if any.
-current_slot() {
+# Running slots this deployer owns, newest first.
+running_slots() {
     docker ps --filter "label=${GAME_LABEL}" --filter status=running \
-        --format '{{.Names}}' | head -n 1
+        --format '{{.Names}}'
 }
 
 # Image ID the given container was started from.
@@ -72,6 +75,14 @@ running_image_id() {
 
 start_slot() {
     local name="$1" port="$2" management_port="$3"
+
+    # Never take over a name that is still serving. The caller picked the idle
+    # slot, so a running container here means the state is not what we think it
+    # is, and forcing it would kill a server holding live matches.
+    if docker ps --filter "name=^${name}$" --filter status=running -q | grep -q .; then
+        log "refusing to start ${name}: a container with that name is running"
+        return 1
+    fi
 
     # A dead container from an earlier failed attempt would block the name.
     docker rm -f "$name" >/dev/null 2>&1 || true
@@ -126,9 +137,65 @@ drain() {
     return 1
 }
 
+# Drain a slot, wait for it to exit on its own, then free the name.
+retire() {
+    local name="$1"
+
+    if drain "$name"; then
+        notify "${name} draining; waiting up to $((DRAIN_TIMEOUT / 60))m for matches to end"
+        if timeout "$DRAIN_TIMEOUT" docker wait "$name" >/dev/null 2>&1; then
+            log "${name} exited on its own"
+        else
+            notify "${name} still had sessions after $((DRAIN_TIMEOUT / 60))m; stopping it"
+            docker stop -t "$STOP_GRACE" "$name" >/dev/null || true
+        fi
+    else
+        notify "could not put ${name} into DRAINING; stopping it after ${STOP_GRACE}s grace"
+        docker stop -t "$STOP_GRACE" "$name" >/dev/null || true
+    fi
+
+    docker rm "$name" >/dev/null 2>&1 || true
+}
+
+# --- pull --------------------------------------------------------------------
+
+log "pulling ${IMAGE}"
+docker pull -q "$IMAGE" >/dev/null
+new_image_id="$(docker image inspect -f '{{.Id}}' "$IMAGE")"
+
 # --- resolve slots -----------------------------------------------------------
 
-live="$(current_slot)"
+mapfile -t slots < <(running_slots)
+
+for name in "${slots[@]}"; do
+    if [ "$name" != "$SLOT_A_NAME" ] && [ "$name" != "$SLOT_B_NAME" ]; then
+        notify "unknown container '${name}' carries ${GAME_LABEL}; refusing to swap"
+        exit 1
+    fi
+done
+
+# Both slots running means an earlier swap was interrupted — the deployer was
+# restarted while it waited for the drain. Finish that swap instead of starting
+# a third container: keep whichever slot already runs the new image and retire
+# the rest.
+if [ "${#slots[@]}" -gt 1 ]; then
+    keeper=""
+    for name in "${slots[@]}"; do
+        if [ "$(running_image_id "$name")" = "$new_image_id" ]; then
+            keeper="$name"
+            break
+        fi
+    done
+    keeper="${keeper:-${slots[0]}}"
+
+    notify "${#slots[@]} slots running; resuming interrupted swap, keeping ${keeper}"
+    for name in "${slots[@]}"; do
+        [ "$name" = "$keeper" ] || retire "$name"
+    done
+    exit 0
+fi
+
+live="${slots[0]:-}"
 
 case "$live" in
     "$SLOT_A_NAME")
@@ -143,17 +210,6 @@ case "$live" in
         ;;
 esac
 
-if [ -n "$live" ] && [ "$live" != "$SLOT_A_NAME" ] && [ "$live" != "$SLOT_B_NAME" ]; then
-    notify "unknown game container '${live}' is running; refusing to swap"
-    exit 1
-fi
-
-# --- pull and compare --------------------------------------------------------
-
-log "pulling ${IMAGE}"
-docker pull -q "$IMAGE" >/dev/null
-new_image_id="$(docker image inspect -f '{{.Id}}' "$IMAGE")"
-
 if [ -n "$live" ] && [ "$(running_image_id "$live")" = "$new_image_id" ]; then
     log "${live} already runs the current image; nothing to do"
     exit 0
@@ -162,7 +218,10 @@ fi
 # --- start the new slot ------------------------------------------------------
 
 notify "starting ${target_name} on port ${target_port}"
-start_slot "$target_name" "$target_port" "$target_management_port"
+if ! start_slot "$target_name" "$target_port" "$target_management_port"; then
+    notify "could not start ${target_name}; keeping ${live:-none}"
+    exit 1
+fi
 
 if ! wait_healthy "$target_name"; then
     notify "${target_name} failed to become healthy; keeping ${live:-none}. Last logs:"
@@ -180,18 +239,5 @@ fi
 
 # --- drain the old slot ------------------------------------------------------
 
-if drain "$live"; then
-    notify "${live} draining; waiting up to $((DRAIN_TIMEOUT / 60))m for matches to end"
-    if timeout "$DRAIN_TIMEOUT" docker wait "$live" >/dev/null 2>&1; then
-        log "${live} exited on its own"
-    else
-        notify "${live} still had sessions after $((DRAIN_TIMEOUT / 60))m; stopping it"
-        docker stop -t "$STOP_GRACE" "$live" >/dev/null || true
-    fi
-else
-    notify "could not put ${live} into DRAINING; stopping it after ${STOP_GRACE}s grace"
-    docker stop -t "$STOP_GRACE" "$live" >/dev/null || true
-fi
-
-docker rm "$live" >/dev/null 2>&1 || true
+retire "$live"
 notify "swap complete: ${target_name} on port ${target_port}"

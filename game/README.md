@@ -9,44 +9,72 @@ No proxy is involved: the client resolves `protocol://domain:port` from the
 `Server` table, so switching slots is just a matter of the new container
 registering itself as `ACTIVE` and the old one moving to `DRAINING`.
 
+## Environments
+
+One deployer per environment, both defined in `docker-compose.yml`.
+
+| | `ac-game` | `dev-game` |
+|---|---|---|
+| Image tag | `:latest`, pushed from WordOnlineServer `deploy` | `:dev`, pushed from its `main` |
+| Slots | `ac-game-blue` 8080, `ac-game-green` 8090 | `dev-game-blue` 7080, `dev-game-green` 7090 |
+| Management | 8081 / 8091, loopback only | 7081 / 7091, loopback only |
+| Network | `wordonline` | `wordonline-dev` |
+| Label | `wordonline.role=ac-game` | `wordonline.role=dev-game` |
+| Poll | 300s | 60s |
+| Drain limit | 1h | 5m |
+| Env file | `ac-game.env` | `dev-game.env` |
+
+`GAME_LABEL` is what keeps the two apart. Each deployer only ever looks at
+containers carrying its own label, so it cannot see — or drain — the other
+environment's slots. Adding a third environment means a third distinct label,
+container name pair, port pair and network.
+
 ## Slots
 
-| Slot | Container | App port | Management port |
-|------|-----------|----------|-----------------|
-| A | `game-blue` | 8080 | 8081 (loopback only) |
-| B | `game-green` | 8090 | 8091 (loopback only) |
-
-Only one slot exists at a time. The idle slot is a name, not a stopped
-container — nothing occupies it until a swap starts. Both containers run
+Only one slot per environment exists at a time. The idle slot is a name, not a
+stopped container — nothing occupies it until a swap starts. Both containers run
 together only during the overlap, from the moment the new one reports healthy
-until the last match on the old one ends. Size the host for two servers running
-at once for that window.
+until the last match on the old one ends. Size the host for both environments
+overlapping at once, worst case four game servers.
 
-Both app ports stay open in the firewall at all times. Inside the container the
-ports are always 8080/8081; only the published host ports differ, and the
+All four app ports stay open in the firewall at all times. Inside the container
+the ports are always 8080/8081; only the published host ports differ, and the
 published app port is injected as `EXTERNAL_PORT` so the server registers the
 address clients can actually reach.
 
-Prometheus needs both management ports as targets. Only one answers at a time,
-so an `up == 0` alert has to require both to be down.
+Prometheus needs all four management ports as targets. Only one per environment
+answers at a time, so an `up == 0` alert has to require both slots of an
+environment to be down.
 
 ## Setup
 
-1. Copy `../env/game.env.example` to `game.env` and fill it in — everything the
-   server needs except `PORT`, `MANAGEMENT_PORT` and `EXTERNAL_PORT`, which the
-   deployer injects per slot. This file holds secrets and is gitignored.
-2. Create a `.env` next to the compose file with `GAME_IMAGE`
-   (`ghcr.io/apptive-game-team/arcane-casters-game:latest`, pushed from the
-   `deploy` branch of WordOnlineServer), `CICD_TOKEN` (a JWT carrying the
-   `WORDONLINE_CICD` authority) and optionally `DISCORD_WEBHOOK_URL`.
-   Both images are private, so the host needs `docker login ghcr.io` with a
-   token that has `read:packages`.
-3. Make sure the `wordonline` docker network exists and the other services are
-   attached to it.
+1. Copy the env examples onto the host and fill them in. They hold secrets and
+   are gitignored.
+
+   | From | To |
+   |------|-----|
+   | `../env/ac-game.env.example` | `ac-game.env` |
+   | `../env/dev-game.env.example` | `dev-game.env` |
+   | `../env/deployer.env.example` | `.env` |
+
+   The two game env files must not share a database or an account server.
+   `PORT`, `MANAGEMENT_PORT` and `EXTERNAL_PORT` are absent from them on
+   purpose — the deployer injects those per slot.
+2. `docker login ghcr.io` with a token that has `read:packages`. Both the game
+   and deployer images are private.
+3. Create the networks if they do not exist, and attach the other services of
+   each environment to the matching one:
+
+   ```bash
+   docker network create wordonline
+   docker network create wordonline-dev
+   ```
 4. Exclude the game containers from watchtower. The deployer labels the
    containers it starts with `com.centurylinklabs.watchtower.enable=false`;
    if watchtower runs in label-enable mode instead, no change is needed.
 5. `docker compose up -d`
+
+To run only one environment: `docker compose up -d ac-game-deployer`.
 
 ## Behaviour
 
@@ -60,12 +88,11 @@ against the running slot. When they differ:
    is left untouched.
 3. Call `DRAIN_METHOD DRAIN_PATH` on the old slot, with the `CICD_TOKEN` as a
    bearer token.
-4. Wait for the old container to exit on its own (`DRAIN_TIMEOUT`, default
-   1h). If matches outlive that, stop it with `STOP_GRACE` seconds of SIGTERM
-   grace.
+4. Wait for the old container to exit on its own (`DRAIN_TIMEOUT`). If matches
+   outlive that, stop it with `STOP_GRACE` seconds of SIGTERM grace.
 
 The endpoints are compose variables, not baked into the image. When the
-server-side routes move, edit `docker-compose.yml` and restart the deployer.
+server-side routes move, edit `docker-compose.yml` and restart the deployers.
 
 A swap can run longer than the poll interval; `flock` makes the next tick skip
 rather than start a second swap.
@@ -88,11 +115,23 @@ and bring the old image straight back up.
 ## Manual swap
 
 ```bash
-docker compose exec game-deployer swap.sh
+docker compose exec ac-game-deployer swap.sh
 ```
+
+## Updating the deployer itself
+
+Nothing updates it automatically; it is excluded from watchtower and does not
+replace itself. After a new deployer image is pushed:
+
+```bash
+docker compose pull && docker compose up -d
+```
+
+Safe at any time. Restarting a deployer mid-swap only abandons the wait — the
+new slot keeps running and the next tick finishes the drain.
 
 ## Security
 
 The deployer mounts `/var/run/docker.sock`, which is equivalent to root on the
-host. Do not publish any port on this container, and only run an image built
+host. Do not publish any port on these containers, and only run an image built
 from this directory.
