@@ -1,0 +1,36 @@
+services:
+  game-deployer:
+    build: .
+    container_name: game-deployer
+    restart: unless-stopped
+    labels:
+      # Watchtower must not restart the deployer mid-swap.
+      com.centurylinklabs.watchtower.enable: "false"
+    networks:
+      - wordonline
+    volumes:
+      # Root-equivalent access to the host. Never expose a port on this
+      # container and only run images you build yourself.
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Environment for the game containers the deployer starts. PORT,
+      # MANAGEMENT_PORT and EXTERNAL_PORT are injected per slot and must not
+      # be set here.
+      - ./game.env:/config/game.env:ro
+    environment:
+      IMAGE: ${GAME_IMAGE}
+      NETWORK: wordonline
+      CICD_TOKEN: ${CICD_TOKEN}
+      DISCORD_WEBHOOK_URL: ${DISCORD_WEBHOOK_URL:-}
+      POLL_INTERVAL: 300
+      SLOT_A_NAME: game-blue
+      SLOT_A_PORT: 8080
+      SLOT_A_MANAGEMENT_PORT: 8081
+      SLOT_B_NAME: game-green
+      SLOT_B_PORT: 8090
+      SLOT_B_MANAGEMENT_PORT: 8091
+      HEALTH_TIMEOUT: 300
+      DRAIN_TIMEOUT: 3600
+
+networks:
+  wordonline:
+    external: true

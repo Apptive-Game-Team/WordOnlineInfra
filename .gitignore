@@ -1,0 +1,4 @@
+# Secrets live on the server only. Track key names in env/*.example instead.
+.env
+*.env
+!*.env.example
