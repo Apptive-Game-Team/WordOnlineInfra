@@ -30,6 +30,12 @@ services:
       SLOT_B_MANAGEMENT_PORT: 8091
       HEALTH_TIMEOUT: 300
       DRAIN_TIMEOUT: 3600
+      # Endpoints on the game server. Change them here when the server-side
+      # routes move; the deployer image stays as is.
+      HEALTH_PATH: /actuator/health
+      HEALTH_UP_PATTERN: '"status":"UP"'
+      DRAIN_PATH: /api/server/servers/mine/state/draining
+      DRAIN_METHOD: POST
 
 networks:
   wordonline:

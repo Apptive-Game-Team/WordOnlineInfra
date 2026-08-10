@@ -21,6 +21,13 @@ CICD_TOKEN="${CICD_TOKEN:?CICD_TOKEN is required}"
 CONTAINER_PORT="${CONTAINER_PORT:-8080}"
 CONTAINER_MANAGEMENT_PORT="${CONTAINER_MANAGEMENT_PORT:-8081}"
 
+# Endpoints the deployer talks to. Overridable from the compose file so a route
+# change on the server side does not need a new deployer image.
+HEALTH_PATH="${HEALTH_PATH:-/actuator/health}"
+HEALTH_UP_PATTERN="${HEALTH_UP_PATTERN:-\"status\":\"UP\"}"
+DRAIN_PATH="${DRAIN_PATH:-/api/server/servers/mine/state/draining}"
+DRAIN_METHOD="${DRAIN_METHOD:-POST}"
+
 # Slot definitions: name, published app port, published management port.
 SLOT_A_NAME="${SLOT_A_NAME:-game-blue}"
 SLOT_A_PORT="${SLOT_A_PORT:-8080}"
@@ -88,8 +95,8 @@ wait_healthy() {
     local name="$1" deadline=$((SECONDS + HEALTH_TIMEOUT))
 
     until curl -sf --max-time 5 \
-        "http://${name}:${CONTAINER_MANAGEMENT_PORT}/actuator/health" \
-        | grep -q '"status":"UP"'; do
+        "http://${name}:${CONTAINER_MANAGEMENT_PORT}${HEALTH_PATH}" \
+        | grep -qF "$HEALTH_UP_PATTERN"; do
 
         if ! docker ps --filter "name=^${name}$" --filter status=running -q | grep -q .; then
             log "$name is no longer running"
@@ -107,9 +114,9 @@ drain() {
     local name="$1" attempt
 
     for attempt in 1 2 3; do
-        if curl -sf --max-time 10 -X POST \
+        if curl -sf --max-time 10 -X "$DRAIN_METHOD" \
             -H "Authorization: Bearer ${CICD_TOKEN}" \
-            "http://${name}:${CONTAINER_PORT}/api/server/servers/mine/state/draining" \
+            "http://${name}:${CONTAINER_PORT}${DRAIN_PATH}" \
             >/dev/null; then
             return 0
         fi
