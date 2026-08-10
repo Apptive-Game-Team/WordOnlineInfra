@@ -14,6 +14,16 @@ filled files exist on the server only.
 | `game/` | Blue/green deployer for the game server — see [game/README.md](game/README.md) |
 | `env/` | Example environment files, key names only |
 
+## Images
+
+| Image | Built by |
+|-------|----------|
+| `ghcr.io/apptive-game-team/arcane-casters-game` | WordOnlineServer — `latest` from `deploy`, `dev` from `main` |
+| `ghcr.io/apptive-game-team/arcane-casters-deployer` | this repository, on every push touching `game/` |
+
+Both are private. The host needs `docker login ghcr.io` with a `read:packages`
+token before either can be pulled.
+
 Not filled in yet: compose for `lobby`, `account`, `admin` and `website`,
 the watchtower service that keeps those up to date, and the Prometheus scrape
 configuration. Those need the files currently living on the server.

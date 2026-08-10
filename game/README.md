@@ -35,15 +35,18 @@ so an `up == 0` alert has to require both to be down.
 1. Copy `../env/game.env.example` to `game.env` and fill it in — everything the
    server needs except `PORT`, `MANAGEMENT_PORT` and `EXTERNAL_PORT`, which the
    deployer injects per slot. This file holds secrets and is gitignored.
-2. Create a `.env` next to the compose file with `GAME_IMAGE`, `CICD_TOKEN`
-   (a JWT carrying the `WORDONLINE_CICD` authority) and optionally
-   `DISCORD_WEBHOOK_URL`.
+2. Create a `.env` next to the compose file with `GAME_IMAGE`
+   (`ghcr.io/apptive-game-team/arcane-casters-game:latest`, pushed from the
+   `deploy` branch of WordOnlineServer), `CICD_TOKEN` (a JWT carrying the
+   `WORDONLINE_CICD` authority) and optionally `DISCORD_WEBHOOK_URL`.
+   Both images are private, so the host needs `docker login ghcr.io` with a
+   token that has `read:packages`.
 3. Make sure the `wordonline` docker network exists and the other services are
    attached to it.
 4. Exclude the game containers from watchtower. The deployer labels the
    containers it starts with `com.centurylinklabs.watchtower.enable=false`;
    if watchtower runs in label-enable mode instead, no change is needed.
-5. `docker compose up -d --build`
+5. `docker compose up -d`
 
 ## Behaviour
 
