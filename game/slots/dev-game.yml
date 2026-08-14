@@ -1,0 +1,56 @@
+# The two dev-game slots.
+#
+# This file creates the slots; it does not run them day to day. After creation
+# the deployer owns them — it rebuilds each slot from that slot's own container
+# config on every deploy, so the image tag here goes stale by design and the
+# labels compose adds are carried along harmlessly.
+#
+#   docker compose -f dev-game.yml create
+#
+# Bringing them up with this file again is a reset, not a routine action: it
+# recreates both containers from the definition below and throws away whatever
+# the deployer had converged them to. Use it after a host rebuild, or when a
+# slot has to be rebuilt from scratch.
+#
+# Paths are absolute because this file does not sit next to the env file it
+# reads. They mirror /home/ubuntu/deploy/dev/ac-test/docker-compose.yml, which
+# is where dev-game itself is defined.
+
+x-slot: &slot
+  image: ghcr.io/apptive-game-team/arcane-casters-game:dev
+  # A drained server exits 0 on purpose. Under `always` docker would read that
+  # as a crash and bring the old version straight back up.
+  restart: on-failure:3
+  networks:
+    - net
+  env_file:
+    - /home/ubuntu/deploy/dev/ac-test/.env.game
+  volumes:
+    - /home/ubuntu/deploy/dev/ac-test/keys:/keys
+
+services:
+  dev-game-blue:
+    <<: *slot
+    container_name: dev-game-blue
+    environment:
+      # Each slot registers its own address. Sharing one would put both slots
+      # in the same Server row, which the server looks up by domain and port.
+      DOMAIN: blue.game.dev.ac.theevilent.com
+    labels:
+      wordonline.group: dev-game
+      wordonline.slot: blue
+      com.centurylinklabs.watchtower.enable: "false"
+
+  dev-game-green:
+    <<: *slot
+    container_name: dev-game-green
+    environment:
+      DOMAIN: green.game.dev.ac.theevilent.com
+    labels:
+      wordonline.group: dev-game
+      wordonline.slot: green
+      com.centurylinklabs.watchtower.enable: "false"
+
+networks:
+  net:
+    external: true
