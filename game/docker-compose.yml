@@ -3,7 +3,11 @@
 #
 # The two deployers must never see each other's containers: each owns the slots
 # carrying its own GAME_LABEL, and drains anything else it finds under that
-# label. Keep the labels, container names, ports and networks distinct.
+# label. Keep the labels, container names and ports distinct.
+#
+# Both environments share the `net` network, so the only thing separating dev
+# from production is the environment file. Point them at different databases
+# and account servers.
 
 x-deployer: &deployer
   # Built and pushed by .github/workflows/docker-ci.yml. `build` stays so
@@ -28,29 +32,37 @@ services:
     <<: *deployer
     container_name: ac-game-deployer
     networks:
-      - wordonline
+      - net
     volumes:
       # Root-equivalent access to the host. Never expose a port on this
       # container and only run images built from this repository.
       - /var/run/docker.sock:/var/run/docker.sock
-      # Environment for the game containers this deployer starts. PORT,
-      # MANAGEMENT_PORT and EXTERNAL_PORT are injected per slot and must not
-      # be set in the file.
-      - ./ac-game.env:/config/game.env:ro
+      # The env files the deployer hands to the game containers. Mounted as a
+      # directory so a file that has not been created yet fails loudly instead
+      # of turning into an empty bind mount.
+      - ./:/config:ro
     environment:
       <<: *endpoints
       IMAGE: ${AC_GAME_IMAGE:-ghcr.io/apptive-game-team/arcane-casters-game:latest}
-      NETWORK: wordonline
+      NETWORK: net
       GAME_LABEL: wordonline.role=ac-game
       CICD_TOKEN: ${AC_CICD_TOKEN}
       DISCORD_WEBHOOK_URL: ${AC_DISCORD_WEBHOOK_URL:-}
       POLL_INTERVAL: 300
+      # Everything both slots share: database, account server, JWT key.
+      GAME_ENV_FILE: /config/ac-game.env
       SLOT_A_NAME: ac-game-blue
       SLOT_A_PORT: 8080
       SLOT_A_MANAGEMENT_PORT: 8081
+      # Per-slot: PROTOCOL, DOMAIN, EXTERNAL_PORT — the address the server
+      # registers for clients to connect to. Behind a proxy that is not the
+      # published port. Drop the two SLOT_*_ENV_FILE lines to fall back to
+      # advertising the published port.
+      SLOT_A_ENV_FILE: /config/ac-game-blue.env
       SLOT_B_NAME: ac-game-green
       SLOT_B_PORT: 8090
       SLOT_B_MANAGEMENT_PORT: 8091
+      SLOT_B_ENV_FILE: /config/ac-game-green.env
       HEALTH_TIMEOUT: 300
       # Real matches. Wait an hour before taking a slot down by force.
       DRAIN_TIMEOUT: 3600
@@ -59,31 +71,32 @@ services:
     <<: *deployer
     container_name: dev-game-deployer
     networks:
-      - wordonline-dev
+      - net
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - ./dev-game.env:/config/game.env:ro
+      - ./:/config:ro
     environment:
       <<: *endpoints
       IMAGE: ${DEV_GAME_IMAGE:-ghcr.io/apptive-game-team/arcane-casters-game:dev}
-      NETWORK: wordonline-dev
+      NETWORK: net
       GAME_LABEL: wordonline.role=dev-game
       CICD_TOKEN: ${DEV_CICD_TOKEN}
       DISCORD_WEBHOOK_URL: ${DEV_DISCORD_WEBHOOK_URL:-}
       # Every push to main lands here, so poll often.
       POLL_INTERVAL: 60
+      GAME_ENV_FILE: /config/dev-game.env
       SLOT_A_NAME: dev-game-blue
       SLOT_A_PORT: 7080
       SLOT_A_MANAGEMENT_PORT: 7081
+      SLOT_A_ENV_FILE: /config/dev-game-blue.env
       SLOT_B_NAME: dev-game-green
       SLOT_B_PORT: 7090
       SLOT_B_MANAGEMENT_PORT: 7091
+      SLOT_B_ENV_FILE: /config/dev-game-green.env
       HEALTH_TIMEOUT: 300
       # Test matches. Do not let one hold a deploy up for long.
       DRAIN_TIMEOUT: 300
 
 networks:
-  wordonline:
-    external: true
-  wordonline-dev:
+  net:
     external: true

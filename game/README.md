@@ -18,16 +18,22 @@ One deployer per environment, both defined in `docker-compose.yml`.
 | Image tag | `:latest`, pushed from WordOnlineServer `deploy` | `:dev`, pushed from its `main` |
 | Slots | `ac-game-blue` 8080, `ac-game-green` 8090 | `dev-game-blue` 7080, `dev-game-green` 7090 |
 | Management | 8081 / 8091, loopback only | 7081 / 7091, loopback only |
-| Network | `wordonline` | `wordonline-dev` |
+| Network | `net` | `net` |
 | Label | `wordonline.role=ac-game` | `wordonline.role=dev-game` |
 | Poll | 300s | 60s |
 | Drain limit | 1h | 5m |
 | Env file | `ac-game.env` | `dev-game.env` |
+| Slot env files | `ac-game-blue.env`, `ac-game-green.env` | `dev-game-blue.env`, `dev-game-green.env` |
 
 `GAME_LABEL` is what keeps the two apart. Each deployer only ever looks at
 containers carrying its own label, so it cannot see — or drain — the other
 environment's slots. Adding a third environment means a third distinct label,
-container name pair, port pair and network.
+container name pair and port pair.
+
+Both environments sit on the same `net` network, so nothing at the network
+layer stops a dev server from reaching production. The separation lives
+entirely in the two env files: give them different databases and different
+account servers.
 
 ## Slots
 
@@ -38,13 +44,35 @@ until the last match on the old one ends. Size the host for both environments
 overlapping at once, worst case four game servers.
 
 All four app ports stay open in the firewall at all times. Inside the container
-the ports are always 8080/8081; only the published host ports differ, and the
-published app port is injected as `EXTERNAL_PORT` so the server registers the
-address clients can actually reach.
+the ports are always 8080/8081; only the published host ports differ.
 
 Prometheus needs all four management ports as targets. Only one per environment
 answers at a time, so an `up == 0` alert has to require both slots of an
 environment to be down.
+
+## Advertised address
+
+`PROTOCOL`, `DOMAIN` and `EXTERNAL_PORT` are what the server writes into the
+`Server` table, and that row is the address clients dial. It is not necessarily
+the port the container publishes — behind a proxy the two differ.
+
+Each slot therefore gets its own env file, layered on top of the environment's
+shared one:
+
+```
+ac-game.env            database, account server, JWT key — both slots
+  ac-game-blue.env     PROTOCOL, DOMAIN, EXTERNAL_PORT for blue
+  ac-game-green.env    the same for green
+```
+
+Later files win, so a key set in the slot file overrides the shared one. Keep
+the slot files down to what actually differs between blue and green.
+
+Without slot files — drop `SLOT_A_ENV_FILE` and `SLOT_B_ENV_FILE` from the
+compose file — the deployer advertises the published host port instead, which
+is right when clients reach the container directly. The fallback also applies
+per key: a slot file that leaves `EXTERNAL_PORT` out still gets the published
+port.
 
 ## Setup
 
@@ -55,20 +83,16 @@ environment to be down.
    |------|-----|
    | `../env/ac-game.env.example` | `ac-game.env` |
    | `../env/dev-game.env.example` | `dev-game.env` |
+   | `../env/slot.env.example` | `ac-game-blue.env`, `ac-game-green.env`, `dev-game-blue.env`, `dev-game-green.env` |
    | `../env/deployer.env.example` | `.env` |
 
    The two game env files must not share a database or an account server.
-   `PORT`, `MANAGEMENT_PORT` and `EXTERNAL_PORT` are absent from them on
-   purpose — the deployer injects those per slot.
+   `PORT` and `MANAGEMENT_PORT` are absent from all of them on purpose — the
+   deployer injects those.
 2. `docker login ghcr.io` with a token that has `read:packages`. Both the game
    and deployer images are private.
-3. Create the networks if they do not exist, and attach the other services of
-   each environment to the matching one:
-
-   ```bash
-   docker network create wordonline
-   docker network create wordonline-dev
-   ```
+3. Make sure the `net` network exists and the other services are attached to
+   it.
 4. Exclude the game containers from watchtower. The deployer labels the
    containers it starts with `com.centurylinklabs.watchtower.enable=false`;
    if watchtower runs in label-enable mode instead, no change is needed.
