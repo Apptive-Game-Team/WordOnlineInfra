@@ -51,13 +51,23 @@ defined, and carrying the mix forward would let the old image's `JAVA_HOME` or
 entrypoint shadow the new image's. Only the deliberate settings are carried
 over.
 
-The cost is that a slot's definition lives only on the host. If the host is
-rebuilt, the slots are seeded again from a container brought up by hand or by
-`~/deploy/game/docker-compose.yml`.
+The cost is that a converged slot lives only on the host. `slots/*.yml` is the
+written-down version to fall back on — enough to recreate a slot from nothing,
+but it does not track what the deployer has since converged the container to.
 
-## Seeding
+## Creating the slots
 
-Run once per environment, cloning a game container that already runs correctly:
+Two ways, both run once per environment.
+
+From the checked-in definition:
+
+```bash
+docker compose -f slots/dev-game.yml create
+```
+
+Or by cloning a game container that already runs correctly, which is the safer
+option when the running container has picked up settings the definition does
+not know about:
 
 ```bash
 docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
