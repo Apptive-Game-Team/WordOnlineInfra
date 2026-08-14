@@ -2,84 +2,91 @@
 
 Replaces watchtower for the `game` module. Watchtower stops a container before
 it starts the replacement, which kills every match in progress. This deployer
-starts the new version on the idle slot first, then drains the old one and lets
-it exit by itself once its session count reaches zero.
+starts the new version on the idle slot first, then drains the live one and
+lets it exit by itself once its session count reaches zero.
 
-No proxy is involved: the client resolves `protocol://domain:port` from the
-`Server` table, so switching slots is just a matter of the new container
-registering itself as `ACTIVE` and the old one moving to `DRAINING`.
+No proxy switching is involved: the client asks the lobby for a game server and
+gets the `protocol://domain:port` the server registered in the `Server` table.
+Blue and green register different hostnames, so handing matches to the new slot
+is just the new container coming up `ACTIVE` and the old one going `DRAINING`.
 
-## Environments
+## Slots
 
-One deployer per environment, both defined in `docker-compose.yml`.
+Each environment owns two containers. Both exist at all times; one runs, the
+other sits stopped. A deploy rebuilds the stopped one on the new image, starts
+it, then drains the live one — which then sits stopped, ready to be the target
+of the next deploy.
 
 | | `ac-game` | `dev-game` |
 |---|---|---|
 | Image tag | `:latest`, pushed from WordOnlineServer `deploy` | `:dev`, pushed from its `main` |
-| Slots | `ac-game-blue` 8080, `ac-game-green` 8090 | `dev-game-blue` 7080, `dev-game-green` 7090 |
-| Management | 8081 / 8091, loopback only | 7081 / 7091, loopback only |
-| Network | `net` | `net` |
-| Label | `wordonline.role=ac-game` | `wordonline.role=dev-game` |
+| Containers | `ac-game-blue`, `ac-game-green` | `dev-game-blue`, `dev-game-green` |
+| Hostnames | `blue.game.ac.theevilent.com`, `green.game.ac.theevilent.com` | `blue.game.dev.ac.theevilent.com`, `green.game.dev.ac.theevilent.com` |
+| Group label | `wordonline.group=ac-game` | `wordonline.group=dev-game` |
 | Poll | 300s | 60s |
 | Drain limit | 1h | 5m |
-| Env file | `ac-game.env` | `dev-game.env` |
 
-`GAME_LABEL` is what keeps the two apart. Each deployer only ever looks at
-containers carrying its own label, so it cannot see — or drain — the other
-environment's slots. Adding a third environment means a third distinct label,
-container name pair and port pair.
+Both slots run together only during the overlap, from the moment the new one
+reports healthy until the last match on the old one ends. Size the host for
+both environments overlapping at once — worst case four game servers.
 
-Both environments sit on the same `net` network, so nothing at the network
-layer stops a dev server from reaching production. The separation lives
-entirely in the two env files: give them different databases and different
-account servers.
+Each slot needs its own hostname in nginx, pointing at that container. Two
+slots sharing a hostname cannot overlap: nginx can only route it to one of
+them, and both would write to the same `Server` row, since the server looks its
+row up by domain and port.
 
-## Slots
+## How a slot is defined
 
-Only one slot per environment exists at a time. The idle slot is a name, not a
-stopped container — nothing occupies it until a swap starts. Both containers run
-together only during the overlap, from the moment the new one reports healthy
-until the last match on the old one ends. Size the host for both environments
-overlapping at once, worst case four game servers.
+Nowhere in this repository. A slot is defined by its own container.
 
-All four app ports stay open in the firewall at all times. Inside the container
-the ports are always 8080/8081; only the published host ports differ.
+The deployer rebuilds a slot the way watchtower does — inspect the container,
+hand the same config back to the create endpoint, swap only the image. Volumes,
+env, networks, labels and resource limits come from the container that was
+already running correctly, so they cannot drift from what the slot needs, and
+there is no list here to forget an entry from.
 
-Prometheus needs all four management ports as targets. Only one per environment
-answers at a time, so an `up == 0` alert has to require both slots of an
-environment to be down.
+Config the image supplies is subtracted first. A container's inspected env and
+labels mix what was asked for at create time with what the image itself
+defined, and carrying the mix forward would let the old image's `JAVA_HOME` or
+entrypoint shadow the new image's. Only the deliberate settings are carried
+over.
 
-## Advertised address
+The cost is that a slot's definition lives only on the host. If the host is
+rebuilt, the slots are seeded again from a container brought up by hand or by
+`~/deploy/game/docker-compose.yml`.
 
-`PROTOCOL`, `DOMAIN` and `EXTERNAL_PORT` are what the server writes into the
-`Server` table, and that row is the address clients dial. Nothing routes on top
-of it — the lobby hands the client that address and the client connects
-straight to the container.
+## Seeding
 
-So the published host port is the advertised port, and the deployer injects
-`EXTERNAL_PORT` per slot. Nothing to configure.
+Run once per environment, cloning a game container that already runs correctly:
+
+```bash
+docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+  -e SOURCE=ac-game -e GROUP=ac-game \
+  -e BLUE_DOMAIN=blue.game.ac.theevilent.com \
+  -e GREEN_DOMAIN=green.game.ac.theevilent.com \
+  --entrypoint /usr/local/bin/seed.sh \
+  ghcr.io/apptive-game-team/arcane-casters-deployer:latest
+```
+
+Both slots are created stopped. The source container keeps running and serving
+— seeding does not hand over. `seed.sh` prints the handover steps: start one
+slot, confirm it registers, drain the source, then remove the source so its
+restart policy or its compose project cannot bring it back.
+
+Two things are changed on the way in. `DOMAIN` becomes the slot's own
+hostname, because two slots sharing one address would fight over a single
+`Server` row. And compose labels are dropped, so `docker compose` in the source
+project does not treat the clones as its own service and remove them.
 
 ## Setup
 
-1. Copy the env examples onto the host and fill them in. They hold secrets and
-   are gitignored.
-
-   | From | To |
-   |------|-----|
-   | `../env/ac-game.env.example` | `ac-game.env` |
-   | `../env/dev-game.env.example` | `dev-game.env` |
-   | `../env/deployer.env.example` | `.env` |
-
-   The two game env files must not share a database or an account server.
-   `PORT`, `MANAGEMENT_PORT` and `EXTERNAL_PORT` are absent from them on
-   purpose — the deployer injects those per slot.
+1. Create `.env` from `../env/deployer.env.example` with the image tags and a
+   `CICD_TOKEN` per environment (a JWT carrying the `WORDONLINE_CICD`
+   authority; the dev token is not valid in production).
 2. `docker login ghcr.io` with a token that has `read:packages`. Both the game
    and deployer images are private.
-3. Make sure the `net` network exists and the other services are attached to
-   it.
-4. Exclude the game containers from watchtower. The deployer labels the
-   containers it starts with `com.centurylinklabs.watchtower.enable=false`;
-   if watchtower runs in label-enable mode instead, no change is needed.
+3. Point nginx at the four slot hostnames.
+4. Seed the slots for each environment, and hand over from the old container.
 5. `docker compose up -d`
 
 To run only one environment: `docker compose up -d ac-game-deployer`.
@@ -87,38 +94,39 @@ To run only one environment: `docker compose up -d ac-game-deployer`.
 ## Behaviour
 
 Every `POLL_INTERVAL` seconds the deployer pulls `IMAGE` and compares its ID
-against the running slot. When they differ:
+against the live slot. When they differ:
 
-1. Start the idle slot from the new image.
-2. Poll `HEALTH_PATH` on the docker network until the body contains
-   `HEALTH_UP_PATTERN` (`HEALTH_TIMEOUT`, default 300s). On failure the new
-   container is removed, the last 50 log lines are reported, and the live slot
-   is left untouched.
-3. Call `DRAIN_METHOD DRAIN_PATH` on the old slot, with the `CICD_TOKEN` as a
+1. Rebuild the idle slot from its own config on the new image, and start it.
+2. Poll `HEALTH_PATH` over the docker network until the body contains
+   `HEALTH_UP_PATTERN` (`HEALTH_TIMEOUT`). On failure the new slot is stopped,
+   its last 50 log lines are reported, and the live slot is left alone.
+3. Call `DRAIN_METHOD DRAIN_PATH` on the live slot with the `CICD_TOKEN` as a
    bearer token.
-4. Wait for the old container to exit on its own (`DRAIN_TIMEOUT`). If matches
-   outlive that, stop it with `STOP_GRACE` seconds of SIGTERM grace.
-
-The endpoints are compose variables, not baked into the image. When the
-server-side routes move, edit `docker-compose.yml` and restart the deployers.
+4. Wait for it to exit on its own (`DRAIN_TIMEOUT`). If matches outlive that,
+   stop it with `STOP_GRACE` seconds of SIGTERM grace.
 
 A swap can run longer than the poll interval; `flock` makes the next tick skip
 rather than start a second swap.
 
-When no slot is running at all — the server was drained by hand, or crashed
-past its restart budget — the image comparison is skipped and the next tick
-just starts a slot. The deployer doubles as the thing that brings the game
-server back.
+If both slots are found running — the deployer was restarted mid-drain — the
+one already on the new image is kept and the other is drained, finishing the
+interrupted swap instead of starting a third container.
+
+If no slot is running at all, the idle one is rebuilt on the current image and
+started. The deployer doubles as the thing that brings the game server back.
 
 ## Container lifecycle
 
 The java process is PID 1, so a drained server exiting with status 0 stops the
-container by itself. Nothing has to stop it. The deployer only waits for that
-exit and then removes the container so the slot name is free again.
+container by itself. The deployer only waits for that exit; it does not remove
+the container, because that container's config is what the next swap rebuilds
+the slot from.
 
-That is why the slots run with `--restart on-failure:3` and never
-`unless-stopped` — the latter would read the drain exit as something to undo
-and bring the old image straight back up.
+Slots are seeded with `on-failure`, never `always`, even when the source
+container used `always`. A drained server exits 0 on purpose, and `always`
+would read that as a crash and bring the old version straight back up. The swap
+also stops the container explicitly after it exits, in case a slot picked up a
+reviving policy some other way.
 
 ## Manual swap
 

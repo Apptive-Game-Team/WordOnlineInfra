@@ -1,13 +1,12 @@
-# Two game environments on one host. `dev-game` tracks the :dev tag pushed from
-# WordOnlineServer main, `ac-game` tracks :latest pushed from its deploy branch.
+# One deployer per game environment. Each watches its image tag and, when it
+# changes, swaps that environment's two slots.
 #
-# The two deployers must never see each other's containers: each owns the slots
-# carrying its own GAME_LABEL, and drains anything else it finds under that
-# label. Keep the labels, container names and ports distinct.
+# The deployer holds no description of a slot — no ports, no env files, no
+# volumes. It rebuilds each slot from that slot's own container config, so
+# whatever a slot needs stays with the slot. See game/README.md.
 #
-# Both environments share the `net` network, so the only thing separating dev
-# from production is the environment file. Point them at different databases
-# and account servers.
+# GROUP_LABEL is what keeps the environments apart. A deployer only ever
+# touches containers carrying its own label.
 
 x-deployer: &deployer
   # Built and pushed by .github/workflows/docker-ci.yml. `build` stays so
@@ -15,47 +14,37 @@ x-deployer: &deployer
   image: ${DEPLOYER_IMAGE:-ghcr.io/apptive-game-team/arcane-casters-deployer:latest}
   build: .
   restart: unless-stopped
+  networks:
+    - net
+  volumes:
+    # Root-equivalent access to the host. Never expose a port on these
+    # containers and only run an image built from this directory.
+    - /var/run/docker.sock:/var/run/docker.sock
   labels:
     # Watchtower must not restart a deployer mid-swap.
     com.centurylinklabs.watchtower.enable: "false"
 
 x-endpoints: &endpoints
-  # Endpoints on the game server. Change them here when the server-side routes
-  # move; the deployer image stays as is.
+  # Endpoints on the game server, reached over the docker network. Change them
+  # here when the server-side routes move; the deployer image stays as is.
   HEALTH_PATH: /actuator/health
   HEALTH_UP_PATTERN: '"status":"UP"'
   DRAIN_PATH: /api/server/servers/mine/state/draining
   DRAIN_METHOD: POST
+  CONTAINER_PORT: 8080
+  CONTAINER_MANAGEMENT_PORT: 8081
 
 services:
   ac-game-deployer:
     <<: *deployer
     container_name: ac-game-deployer
-    networks:
-      - net
-    volumes:
-      # Root-equivalent access to the host. Never expose a port on this
-      # container and only run images built from this repository.
-      - /var/run/docker.sock:/var/run/docker.sock
-      # The env file the deployer hands to the game containers.
-      - ./ac-game.env:/config/ac-game.env:ro
     environment:
       <<: *endpoints
       IMAGE: ${AC_GAME_IMAGE:-ghcr.io/apptive-game-team/arcane-casters-game:latest}
-      NETWORK: net
-      GAME_LABEL: wordonline.role=ac-game
+      GROUP_LABEL: wordonline.group=ac-game
       CICD_TOKEN: ${AC_CICD_TOKEN}
       DISCORD_WEBHOOK_URL: ${AC_DISCORD_WEBHOOK_URL:-}
       POLL_INTERVAL: 300
-      # Everything both slots share. PORT, MANAGEMENT_PORT and EXTERNAL_PORT
-      # are injected per slot and must not be set in the file.
-      GAME_ENV_FILE: /config/ac-game.env
-      SLOT_A_NAME: ac-game-blue
-      SLOT_A_PORT: 8080
-      SLOT_A_MANAGEMENT_PORT: 8081
-      SLOT_B_NAME: ac-game-green
-      SLOT_B_PORT: 8090
-      SLOT_B_MANAGEMENT_PORT: 8091
       HEALTH_TIMEOUT: 300
       # Real matches. Wait an hour before taking a slot down by force.
       DRAIN_TIMEOUT: 3600
@@ -63,27 +52,14 @@ services:
   dev-game-deployer:
     <<: *deployer
     container_name: dev-game-deployer
-    networks:
-      - net
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-      - ./dev-game.env:/config/dev-game.env:ro
     environment:
       <<: *endpoints
       IMAGE: ${DEV_GAME_IMAGE:-ghcr.io/apptive-game-team/arcane-casters-game:dev}
-      NETWORK: net
-      GAME_LABEL: wordonline.role=dev-game
+      GROUP_LABEL: wordonline.group=dev-game
       CICD_TOKEN: ${DEV_CICD_TOKEN}
       DISCORD_WEBHOOK_URL: ${DEV_DISCORD_WEBHOOK_URL:-}
       # Every push to main lands here, so poll often.
       POLL_INTERVAL: 60
-      GAME_ENV_FILE: /config/dev-game.env
-      SLOT_A_NAME: dev-game-blue
-      SLOT_A_PORT: 7080
-      SLOT_A_MANAGEMENT_PORT: 7081
-      SLOT_B_NAME: dev-game-green
-      SLOT_B_PORT: 7090
-      SLOT_B_MANAGEMENT_PORT: 7091
       HEALTH_TIMEOUT: 300
       # Test matches. Do not let one hold a deploy up for long.
       DRAIN_TIMEOUT: 300
