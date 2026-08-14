@@ -28,7 +28,9 @@ HEALTH_UP_PATTERN="${HEALTH_UP_PATTERN:-\"status\":\"UP\"}"
 DRAIN_PATH="${DRAIN_PATH:-/api/server/servers/mine/state/draining}"
 DRAIN_METHOD="${DRAIN_METHOD:-POST}"
 
-# Slot definitions: name, published app port, published management port.
+# Slot definitions: name, published app port, published management port. The
+# published app port is also what the server advertises in the Server table,
+# because clients dial that address directly.
 SLOT_A_NAME="${SLOT_A_NAME:-game-blue}"
 SLOT_A_PORT="${SLOT_A_PORT:-8080}"
 SLOT_A_MANAGEMENT_PORT="${SLOT_A_MANAGEMENT_PORT:-8081}"

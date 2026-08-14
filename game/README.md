@@ -18,7 +18,7 @@ One deployer per environment, both defined in `docker-compose.yml`.
 | Image tag | `:latest`, pushed from WordOnlineServer `deploy` | `:dev`, pushed from its `main` |
 | Slots | `ac-game-blue` 8080, `ac-game-green` 8090 | `dev-game-blue` 7080, `dev-game-green` 7090 |
 | Management | 8081 / 8091, loopback only | 7081 / 7091, loopback only |
-| Network | `wordonline` | `wordonline-dev` |
+| Network | `net` | `net` |
 | Label | `wordonline.role=ac-game` | `wordonline.role=dev-game` |
 | Poll | 300s | 60s |
 | Drain limit | 1h | 5m |
@@ -27,7 +27,12 @@ One deployer per environment, both defined in `docker-compose.yml`.
 `GAME_LABEL` is what keeps the two apart. Each deployer only ever looks at
 containers carrying its own label, so it cannot see — or drain — the other
 environment's slots. Adding a third environment means a third distinct label,
-container name pair, port pair and network.
+container name pair and port pair.
+
+Both environments sit on the same `net` network, so nothing at the network
+layer stops a dev server from reaching production. The separation lives
+entirely in the two env files: give them different databases and different
+account servers.
 
 ## Slots
 
@@ -38,13 +43,21 @@ until the last match on the old one ends. Size the host for both environments
 overlapping at once, worst case four game servers.
 
 All four app ports stay open in the firewall at all times. Inside the container
-the ports are always 8080/8081; only the published host ports differ, and the
-published app port is injected as `EXTERNAL_PORT` so the server registers the
-address clients can actually reach.
+the ports are always 8080/8081; only the published host ports differ.
 
 Prometheus needs all four management ports as targets. Only one per environment
 answers at a time, so an `up == 0` alert has to require both slots of an
 environment to be down.
+
+## Advertised address
+
+`PROTOCOL`, `DOMAIN` and `EXTERNAL_PORT` are what the server writes into the
+`Server` table, and that row is the address clients dial. Nothing routes on top
+of it — the lobby hands the client that address and the client connects
+straight to the container.
+
+So the published host port is the advertised port, and the deployer injects
+`EXTERNAL_PORT` per slot. Nothing to configure.
 
 ## Setup
 
@@ -62,13 +75,8 @@ environment to be down.
    purpose — the deployer injects those per slot.
 2. `docker login ghcr.io` with a token that has `read:packages`. Both the game
    and deployer images are private.
-3. Create the networks if they do not exist, and attach the other services of
-   each environment to the matching one:
-
-   ```bash
-   docker network create wordonline
-   docker network create wordonline-dev
-   ```
+3. Make sure the `net` network exists and the other services are attached to
+   it.
 4. Exclude the game containers from watchtower. The deployer labels the
    containers it starts with `com.centurylinklabs.watchtower.enable=false`;
    if watchtower runs in label-enable mode instead, no change is needed.
