@@ -1,6 +1,6 @@
 FROM docker:27-cli
 
-RUN apk add --no-cache bash curl jq
+RUN apk add --no-cache bash curl jq flock
 
 COPY swap.sh /usr/local/bin/swap.sh
 COPY seed.sh /usr/local/bin/seed.sh
