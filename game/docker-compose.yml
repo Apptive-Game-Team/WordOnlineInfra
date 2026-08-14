@@ -49,20 +49,16 @@ services:
       CICD_TOKEN: ${AC_CICD_TOKEN}
       DISCORD_WEBHOOK_URL: ${AC_DISCORD_WEBHOOK_URL:-}
       POLL_INTERVAL: 300
-      # Everything both slots share: database, account server, JWT key.
+      # Clients dial the address the server registers, and without a proxy in
+      # front that is the published port. Set SLOT_A_ENV_FILE / SLOT_B_ENV_FILE
+      # to per-slot files when that stops being true — see game/README.md.
       GAME_ENV_FILE: /config/ac-game.env
       SLOT_A_NAME: ac-game-blue
       SLOT_A_PORT: 8080
       SLOT_A_MANAGEMENT_PORT: 8081
-      # Per-slot: PROTOCOL, DOMAIN, EXTERNAL_PORT — the address the server
-      # registers for clients to connect to. Behind a proxy that is not the
-      # published port. Drop the two SLOT_*_ENV_FILE lines to fall back to
-      # advertising the published port.
-      SLOT_A_ENV_FILE: /config/ac-game-blue.env
       SLOT_B_NAME: ac-game-green
       SLOT_B_PORT: 8090
       SLOT_B_MANAGEMENT_PORT: 8091
-      SLOT_B_ENV_FILE: /config/ac-game-green.env
       HEALTH_TIMEOUT: 300
       # Real matches. Wait an hour before taking a slot down by force.
       DRAIN_TIMEOUT: 3600
@@ -88,11 +84,9 @@ services:
       SLOT_A_NAME: dev-game-blue
       SLOT_A_PORT: 7080
       SLOT_A_MANAGEMENT_PORT: 7081
-      SLOT_A_ENV_FILE: /config/dev-game-blue.env
       SLOT_B_NAME: dev-game-green
       SLOT_B_PORT: 7090
       SLOT_B_MANAGEMENT_PORT: 7091
-      SLOT_B_ENV_FILE: /config/dev-game-green.env
       HEALTH_TIMEOUT: 300
       # Test matches. Do not let one hold a deploy up for long.
       DRAIN_TIMEOUT: 300

@@ -23,7 +23,6 @@ One deployer per environment, both defined in `docker-compose.yml`.
 | Poll | 300s | 60s |
 | Drain limit | 1h | 5m |
 | Env file | `ac-game.env` | `dev-game.env` |
-| Slot env files | `ac-game-blue.env`, `ac-game-green.env` | `dev-game-blue.env`, `dev-game-green.env` |
 
 `GAME_LABEL` is what keeps the two apart. Each deployer only ever looks at
 containers carrying its own label, so it cannot see — or drain — the other
@@ -53,11 +52,18 @@ environment to be down.
 ## Advertised address
 
 `PROTOCOL`, `DOMAIN` and `EXTERNAL_PORT` are what the server writes into the
-`Server` table, and that row is the address clients dial. It is not necessarily
-the port the container publishes — behind a proxy the two differ.
+`Server` table, and that row is the address clients dial. Nothing routes on
+top of it — the lobby hands the client that address and the client connects
+straight to the container.
 
-Each slot therefore gets its own env file, layered on top of the environment's
-shared one:
+So the published host port is the advertised port, and the deployer injects
+`EXTERNAL_PORT` for each slot automatically. Nothing to configure.
+
+### If a proxy is ever put in front
+
+Then the two stop being the same value, and each slot needs its own address.
+Set `SLOT_A_ENV_FILE` and `SLOT_B_ENV_FILE` in the compose file to per-slot env
+files layered on top of the environment's shared one:
 
 ```
 ac-game.env            database, account server, JWT key — both slots
@@ -65,14 +71,9 @@ ac-game.env            database, account server, JWT key — both slots
   ac-game-green.env    the same for green
 ```
 
-Later files win, so a key set in the slot file overrides the shared one. Keep
-the slot files down to what actually differs between blue and green.
-
-Without slot files — drop `SLOT_A_ENV_FILE` and `SLOT_B_ENV_FILE` from the
-compose file — the deployer advertises the published host port instead, which
-is right when clients reach the container directly. The fallback also applies
-per key: a slot file that leaves `EXTERNAL_PORT` out still gets the published
-port.
+Later files win. A slot file that leaves `EXTERNAL_PORT` out still gets the
+published port, so it only has to carry what actually differs.
+`../env/slot.env.example` is the template.
 
 ## Setup
 
@@ -83,12 +84,11 @@ port.
    |------|-----|
    | `../env/ac-game.env.example` | `ac-game.env` |
    | `../env/dev-game.env.example` | `dev-game.env` |
-   | `../env/slot.env.example` | `ac-game-blue.env`, `ac-game-green.env`, `dev-game-blue.env`, `dev-game-green.env` |
    | `../env/deployer.env.example` | `.env` |
 
    The two game env files must not share a database or an account server.
-   `PORT` and `MANAGEMENT_PORT` are absent from all of them on purpose — the
-   deployer injects those.
+   `PORT`, `MANAGEMENT_PORT` and `EXTERNAL_PORT` are absent from them on
+   purpose — the deployer injects those per slot.
 2. `docker login ghcr.io` with a token that has `read:packages`. Both the game
    and deployer images are private.
 3. Make sure the `net` network exists and the other services are attached to
