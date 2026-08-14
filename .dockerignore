@@ -1,0 +1,9 @@
+# The build context is the repository root, so keep everything that is not part
+# of the deployer image out of it.
+.git
+.github
+slots
+env
+docker-compose.yml
+README.md
+*.env

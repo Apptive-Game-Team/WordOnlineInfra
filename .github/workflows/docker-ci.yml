@@ -5,7 +5,8 @@ on:
     branches:
       - main
     paths:
-      - 'game/**'
+      - 'Dockerfile'
+      - '*.sh'
       - '.github/workflows/docker-ci.yml'
   workflow_dispatch:
 
@@ -45,7 +46,7 @@ jobs:
       - name: Build and push
         uses: docker/build-push-action@v5
         with:
-          context: game
+          context: .
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}

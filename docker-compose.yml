@@ -3,7 +3,7 @@
 #
 # The deployer holds no description of a slot — no ports, no env files, no
 # volumes. It rebuilds each slot from that slot's own container config, so
-# whatever a slot needs stays with the slot. See game/README.md.
+# whatever a slot needs stays with the slot. See README.md.
 #
 # GROUP_LABEL is what keeps the environments apart. A deployer only ever
 # touches containers carrying its own label.
@@ -12,6 +12,9 @@ x-deployer: &deployer
   # Built and pushed by .github/workflows/docker-ci.yml. `build` stays so
   # `docker compose up --build` still works when testing a local change.
   image: ${DEPLOYER_IMAGE:-ghcr.io/apptive-game-team/arcane-casters-deployer:latest}
+  # `build` is for working on the deployer from a checkout of this repository.
+  # The host only needs this file, .env and slots/ — swap.sh and the rest are
+  # baked into the image by CI.
   build: .
   restart: unless-stopped
   networks:
