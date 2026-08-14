@@ -28,21 +28,15 @@ HEALTH_UP_PATTERN="${HEALTH_UP_PATTERN:-\"status\":\"UP\"}"
 DRAIN_PATH="${DRAIN_PATH:-/api/server/servers/mine/state/draining}"
 DRAIN_METHOD="${DRAIN_METHOD:-POST}"
 
-# Slot definitions: name, published app port, published management port, and an
-# optional env file layered on top of GAME_ENV_FILE.
-#
-# The slot env file is where the address clients should reach this slot at
-# lives — PROTOCOL, DOMAIN and EXTERNAL_PORT. Those are what the server writes
-# into the Server table, and behind a proxy they are not the published host
-# port. Without a slot env file the published port is advertised as is.
+# Slot definitions: name, published app port, published management port. The
+# published app port is also what the server advertises in the Server table,
+# because clients dial that address directly.
 SLOT_A_NAME="${SLOT_A_NAME:-game-blue}"
 SLOT_A_PORT="${SLOT_A_PORT:-8080}"
 SLOT_A_MANAGEMENT_PORT="${SLOT_A_MANAGEMENT_PORT:-8081}"
-SLOT_A_ENV_FILE="${SLOT_A_ENV_FILE:-}"
 SLOT_B_NAME="${SLOT_B_NAME:-game-green}"
 SLOT_B_PORT="${SLOT_B_PORT:-8090}"
 SLOT_B_MANAGEMENT_PORT="${SLOT_B_MANAGEMENT_PORT:-8091}"
-SLOT_B_ENV_FILE="${SLOT_B_ENV_FILE:-}"
 
 # The management port is bound to loopback so only a local Prometheus can
 # scrape it. The deployer itself reaches actuator over the docker network.
@@ -82,26 +76,7 @@ running_image_id() {
 }
 
 start_slot() {
-    local name="$1" port="$2" management_port="$3" slot_env_file="${4:-}"
-    local -a env_args=(--env-file "$GAME_ENV_FILE")
-
-    if [ -n "$slot_env_file" ]; then
-        if [ ! -r "$slot_env_file" ]; then
-            log "slot env file ${slot_env_file} is missing or unreadable"
-            return 1
-        fi
-        # Later files win, so the slot file overrides the shared one.
-        env_args+=(--env-file "$slot_env_file")
-    fi
-
-    env_args+=(--env "PORT=${CONTAINER_PORT}")
-    env_args+=(--env "MANAGEMENT_PORT=${CONTAINER_MANAGEMENT_PORT}")
-
-    # Only advertise the published port when nothing else says otherwise. A
-    # --env flag would beat the slot file, so this has to stay conditional.
-    if [ -z "$slot_env_file" ] || ! grep -q '^[[:space:]]*EXTERNAL_PORT=' "$slot_env_file"; then
-        env_args+=(--env "EXTERNAL_PORT=${port}")
-    fi
+    local name="$1" port="$2" management_port="$3"
 
     # Never take over a name that is still serving. The caller picked the idle
     # slot, so a running container here means the state is not what we think it
@@ -119,7 +94,10 @@ start_slot() {
         --label "$GAME_LABEL" \
         --label 'com.centurylinklabs.watchtower.enable=false' \
         --network "$NETWORK" \
-        "${env_args[@]}" \
+        --env-file "$GAME_ENV_FILE" \
+        --env "PORT=${CONTAINER_PORT}" \
+        --env "MANAGEMENT_PORT=${CONTAINER_MANAGEMENT_PORT}" \
+        --env "EXTERNAL_PORT=${port}" \
         --publish "${port}:${CONTAINER_PORT}" \
         --publish "${MANAGEMENT_BIND}:${management_port}:${CONTAINER_MANAGEMENT_PORT}" \
         --restart on-failure:3 \
@@ -226,13 +204,11 @@ case "$live" in
         target_name="$SLOT_B_NAME"
         target_port="$SLOT_B_PORT"
         target_management_port="$SLOT_B_MANAGEMENT_PORT"
-        target_env_file="$SLOT_B_ENV_FILE"
         ;;
     *)
         target_name="$SLOT_A_NAME"
         target_port="$SLOT_A_PORT"
         target_management_port="$SLOT_A_MANAGEMENT_PORT"
-        target_env_file="$SLOT_A_ENV_FILE"
         ;;
 esac
 
@@ -244,7 +220,7 @@ fi
 # --- start the new slot ------------------------------------------------------
 
 notify "starting ${target_name} on port ${target_port}"
-if ! start_slot "$target_name" "$target_port" "$target_management_port" "$target_env_file"; then
+if ! start_slot "$target_name" "$target_port" "$target_management_port"; then
     notify "could not start ${target_name}; keeping ${live:-none}"
     exit 1
 fi

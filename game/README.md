@@ -52,28 +52,12 @@ environment to be down.
 ## Advertised address
 
 `PROTOCOL`, `DOMAIN` and `EXTERNAL_PORT` are what the server writes into the
-`Server` table, and that row is the address clients dial. Nothing routes on
-top of it — the lobby hands the client that address and the client connects
+`Server` table, and that row is the address clients dial. Nothing routes on top
+of it — the lobby hands the client that address and the client connects
 straight to the container.
 
 So the published host port is the advertised port, and the deployer injects
-`EXTERNAL_PORT` for each slot automatically. Nothing to configure.
-
-### If a proxy is ever put in front
-
-Then the two stop being the same value, and each slot needs its own address.
-Set `SLOT_A_ENV_FILE` and `SLOT_B_ENV_FILE` in the compose file to per-slot env
-files layered on top of the environment's shared one:
-
-```
-ac-game.env            database, account server, JWT key — both slots
-  ac-game-blue.env     PROTOCOL, DOMAIN, EXTERNAL_PORT for blue
-  ac-game-green.env    the same for green
-```
-
-Later files win. A slot file that leaves `EXTERNAL_PORT` out still gets the
-published port, so it only has to carry what actually differs.
-`../env/slot.env.example` is the template.
+`EXTERNAL_PORT` per slot. Nothing to configure.
 
 ## Setup
 

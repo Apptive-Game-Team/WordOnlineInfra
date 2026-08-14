@@ -37,10 +37,8 @@ services:
       # Root-equivalent access to the host. Never expose a port on this
       # container and only run images built from this repository.
       - /var/run/docker.sock:/var/run/docker.sock
-      # The env files the deployer hands to the game containers. Mounted as a
-      # directory so a file that has not been created yet fails loudly instead
-      # of turning into an empty bind mount.
-      - ./:/config:ro
+      # The env file the deployer hands to the game containers.
+      - ./ac-game.env:/config/ac-game.env:ro
     environment:
       <<: *endpoints
       IMAGE: ${AC_GAME_IMAGE:-ghcr.io/apptive-game-team/arcane-casters-game:latest}
@@ -49,9 +47,8 @@ services:
       CICD_TOKEN: ${AC_CICD_TOKEN}
       DISCORD_WEBHOOK_URL: ${AC_DISCORD_WEBHOOK_URL:-}
       POLL_INTERVAL: 300
-      # Clients dial the address the server registers, and without a proxy in
-      # front that is the published port. Set SLOT_A_ENV_FILE / SLOT_B_ENV_FILE
-      # to per-slot files when that stops being true — see game/README.md.
+      # Everything both slots share. PORT, MANAGEMENT_PORT and EXTERNAL_PORT
+      # are injected per slot and must not be set in the file.
       GAME_ENV_FILE: /config/ac-game.env
       SLOT_A_NAME: ac-game-blue
       SLOT_A_PORT: 8080
@@ -70,7 +67,7 @@ services:
       - net
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - ./:/config:ro
+      - ./dev-game.env:/config/dev-game.env:ro
     environment:
       <<: *endpoints
       IMAGE: ${DEV_GAME_IMAGE:-ghcr.io/apptive-game-team/arcane-casters-game:dev}
