@@ -2,55 +2,50 @@
 #
 # Blue/green swap for the game server.
 #
-# Starts the new image on the idle slot, waits for it to register and report
-# healthy, then drains the live slot. The game server exits by itself once its
-# session count reaches zero, so the old container is never killed with players
-# inside it.
+# Both slots exist as containers at all times; one runs, the other sits
+# stopped. A swap recreates the stopped slot from its own previous config with
+# the new image, starts it, then drains the running one and lets it exit by
+# itself once its last match ends.
 #
-# Exit codes: 0 = swapped or already up to date, 1 = failed (old slot untouched).
+# The config is cloned the way watchtower does it — inspect the container and
+# hand the same Config/HostConfig/NetworkingConfig back to the create endpoint
+# with only the image swapped. Nothing about the slot is described here, so
+# volumes, env files, networks and labels cannot drift out of sync with what
+# the slot actually needs.
+#
+# Exit codes: 0 = swapped or already up to date, 1 = failed (live slot untouched).
 
 set -euo pipefail
 
 IMAGE="${IMAGE:?IMAGE is required}"
-NETWORK="${NETWORK:?NETWORK is required}"
-GAME_ENV_FILE="${GAME_ENV_FILE:-/config/game.env}"
 CICD_TOKEN="${CICD_TOKEN:?CICD_TOKEN is required}"
 
-# Ports inside the container. Both slots use the same values; only the
-# published host ports differ.
+# Every container carrying this label belongs to this deployer. Each
+# environment on the host needs its own value, otherwise one deployer treats
+# the other's slots as its own and drains them.
+GROUP_LABEL="${GROUP_LABEL:?GROUP_LABEL is required}"
+
+# Ports inside the container. The deployer reaches the slots over the docker
+# network, so nothing has to be published on the host.
 CONTAINER_PORT="${CONTAINER_PORT:-8080}"
 CONTAINER_MANAGEMENT_PORT="${CONTAINER_MANAGEMENT_PORT:-8081}"
 
-# Endpoints the deployer talks to. Overridable from the compose file so a route
-# change on the server side does not need a new deployer image.
+# Endpoints on the game server. Overridable so a route change does not need a
+# new deployer image.
 HEALTH_PATH="${HEALTH_PATH:-/actuator/health}"
 HEALTH_UP_PATTERN="${HEALTH_UP_PATTERN:-\"status\":\"UP\"}"
 DRAIN_PATH="${DRAIN_PATH:-/api/server/servers/mine/state/draining}"
 DRAIN_METHOD="${DRAIN_METHOD:-POST}"
-
-# Slot definitions: name, published app port, published management port. The
-# published app port is also what the server advertises in the Server table,
-# because clients dial that address directly.
-SLOT_A_NAME="${SLOT_A_NAME:-game-blue}"
-SLOT_A_PORT="${SLOT_A_PORT:-8080}"
-SLOT_A_MANAGEMENT_PORT="${SLOT_A_MANAGEMENT_PORT:-8081}"
-SLOT_B_NAME="${SLOT_B_NAME:-game-green}"
-SLOT_B_PORT="${SLOT_B_PORT:-8090}"
-SLOT_B_MANAGEMENT_PORT="${SLOT_B_MANAGEMENT_PORT:-8091}"
-
-# The management port is bound to loopback so only a local Prometheus can
-# scrape it. The deployer itself reaches actuator over the docker network.
-MANAGEMENT_BIND="${MANAGEMENT_BIND:-127.0.0.1}"
 
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-300}"   # seconds to wait for the new slot
 DRAIN_TIMEOUT="${DRAIN_TIMEOUT:-3600}"    # seconds to wait for matches to end
 STOP_GRACE="${STOP_GRACE:-30}"            # SIGTERM grace when drain overruns
 DISCORD_WEBHOOK_URL="${DISCORD_WEBHOOK_URL:-}"
 
-# Identifies the containers this deployer owns. Every environment on the host
-# needs its own value, otherwise one deployer treats the other's slots as its
-# own and drains them.
-GAME_LABEL="${GAME_LABEL:-wordonline.role=game}"
+DOCKER_SOCKET="${DOCKER_SOCKET:-/var/run/docker.sock}"
+# Payloads are kept after a failed create so the container can be restored by
+# hand instead of being lost.
+SPOOL_DIR="${SPOOL_DIR:-/tmp/swap}"
 
 log() {
     printf '%s [swap] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*"
@@ -64,44 +59,98 @@ notify() {
         "$DISCORD_WEBHOOK_URL" >/dev/null || true
 }
 
-# Running slots this deployer owns, newest first.
-running_slots() {
-    docker ps --filter "label=${GAME_LABEL}" --filter status=running \
-        --format '{{.Names}}'
+api() {
+    local method="$1" path="$2"
+    shift 2
+    curl -sS --fail-with-body --unix-socket "$DOCKER_SOCKET" \
+        -X "$method" "http://localhost${path}" "$@"
 }
 
-# Image ID the given container was started from.
+all_slots() {
+    docker ps -a --filter "label=${GROUP_LABEL}" --format '{{.Names}}'
+}
+
+# Anything not running counts as idle. A freshly seeded slot sits in `created`
+# rather than `exited`, and a filter on `exited` alone would miss it.
+running_slots() {
+    docker ps --filter "label=${GROUP_LABEL}" --format '{{.Names}}'
+}
+
+slot_of() {
+    docker inspect -f '{{index .Config.Labels "wordonline.slot"}}' "$1" 2>/dev/null || true
+}
+
 running_image_id() {
     docker inspect -f '{{.Image}}' "$1" 2>/dev/null || true
 }
 
-start_slot() {
-    local name="$1" port="$2" management_port="$3"
+# Rebuild a container under the same name from its own config, on a new image.
+#
+# A container's inspected config mixes two things: what was asked for at create
+# time, and what the image supplied. Copying the mix forward would pin the new
+# image to the old image's defaults — a new JAVA_HOME or entrypoint would be
+# shadowed by the old one and the swap would quietly run the wrong thing. So
+# every field the image also defines is subtracted first, and only the
+# deliberate settings are carried over. This is what watchtower does too.
+#
+# Hostname is dropped as well; keeping it would pin the new container to the
+# old one's ID.
+recreate() {
+    local name="$1" image_id="$2"
+    local payload="${SPOOL_DIR}/${name}.json"
+    local old_image image_config
 
-    # Never take over a name that is still serving. The caller picked the idle
-    # slot, so a running container here means the state is not what we think it
-    # is, and forcing it would kill a server holding live matches.
-    if docker ps --filter "name=^${name}$" --filter status=running -q | grep -q .; then
-        log "refusing to start ${name}: a container with that name is running"
+    mkdir -p "$SPOOL_DIR"
+
+    old_image="$(docker inspect -f '{{.Image}}' "$name")"
+    image_config="$(docker image inspect "$old_image" | jq '.[0].Config')"
+
+    if ! docker inspect "$name" | jq \
+        --arg image "$image_id" \
+        --argjson img "$image_config" '
+        .[0] as $c
+        | $c.Config as $cfg
+        | {
+            Image: $image,
+            Env: (($cfg.Env // []) - ($img.Env // [])),
+            Labels: (
+                ($cfg.Labels // {})
+                | with_entries(
+                    select(($img.Labels // {})[.key] != .value)
+                  )
+            ),
+            HostConfig: $c.HostConfig,
+            NetworkingConfig: {
+                EndpointsConfig: (
+                    $c.NetworkSettings.Networks
+                    | with_entries(.value |= {
+                        Aliases: (.Aliases // [] | map(select(. != null))),
+                        Links: .Links,
+                        DriverOpts: .DriverOpts
+                      })
+                )
+            }
+        }
+        # Carried over only when the container overrode the image.
+        + ( ["Cmd", "Entrypoint", "User", "WorkingDir", "ExposedPorts",
+             "Volumes", "Healthcheck", "StopSignal", "Tty", "OpenStdin"]
+            | map(select($cfg[.] != $img[.]) | {(.): $cfg[.]})
+            | add // {}
+          )' > "$payload"; then
+        log "could not build a create payload for ${name}"
         return 1
     fi
 
-    # A dead container from an earlier failed attempt would block the name.
-    docker rm -f "$name" >/dev/null 2>&1 || true
+    docker rm "$name" >/dev/null
 
-    docker run -d \
-        --name "$name" \
-        --label "$GAME_LABEL" \
-        --label 'com.centurylinklabs.watchtower.enable=false' \
-        --network "$NETWORK" \
-        --env-file "$GAME_ENV_FILE" \
-        --env "PORT=${CONTAINER_PORT}" \
-        --env "MANAGEMENT_PORT=${CONTAINER_MANAGEMENT_PORT}" \
-        --env "EXTERNAL_PORT=${port}" \
-        --publish "${port}:${CONTAINER_PORT}" \
-        --publish "${MANAGEMENT_BIND}:${management_port}:${CONTAINER_MANAGEMENT_PORT}" \
-        --restart on-failure:3 \
-        "$IMAGE" >/dev/null
+    if ! api POST "/containers/create?name=${name}" \
+        -H 'Content-Type: application/json' --data "@${payload}" >/dev/null; then
+        notify "recreating ${name} failed; its config is saved at ${payload} inside the deployer"
+        return 1
+    fi
+
+    rm -f "$payload"
+    docker start "$name" >/dev/null
 }
 
 wait_healthy() {
@@ -139,7 +188,8 @@ drain() {
     return 1
 }
 
-# Drain a slot, wait for it to exit on its own, then free the name.
+# Drain a slot and wait for it to exit. The container is left in place, not
+# removed — its config is what the next swap rebuilds it from.
 retire() {
     local name="$1"
 
@@ -147,16 +197,17 @@ retire() {
         notify "${name} draining; waiting up to $((DRAIN_TIMEOUT / 60))m for matches to end"
         if timeout "$DRAIN_TIMEOUT" docker wait "$name" >/dev/null 2>&1; then
             log "${name} exited on its own"
-        else
-            notify "${name} still had sessions after $((DRAIN_TIMEOUT / 60))m; stopping it"
-            docker stop -t "$STOP_GRACE" "$name" >/dev/null || true
+            # Belt and braces against a restart policy reviving it: the exit is
+            # deliberate, so make sure docker leaves it down.
+            docker stop -t 5 "$name" >/dev/null 2>&1 || true
+            return 0
         fi
+        notify "${name} still had sessions after $((DRAIN_TIMEOUT / 60))m; stopping it"
     else
         notify "could not put ${name} into DRAINING; stopping it after ${STOP_GRACE}s grace"
-        docker stop -t "$STOP_GRACE" "$name" >/dev/null || true
     fi
 
-    docker rm "$name" >/dev/null 2>&1 || true
+    docker stop -t "$STOP_GRACE" "$name" >/dev/null || true
 }
 
 # --- pull --------------------------------------------------------------------
@@ -167,79 +218,89 @@ new_image_id="$(docker image inspect -f '{{.Id}}' "$IMAGE")"
 
 # --- resolve slots -----------------------------------------------------------
 
-mapfile -t slots < <(running_slots)
+mapfile -t all < <(all_slots)
+mapfile -t running < <(running_slots)
 
-for name in "${slots[@]}"; do
-    if [ "$name" != "$SLOT_A_NAME" ] && [ "$name" != "$SLOT_B_NAME" ]; then
-        notify "unknown container '${name}' carries ${GAME_LABEL}; refusing to swap"
-        exit 1
-    fi
+idle=()
+for name in "${all[@]}"; do
+    is_running=0
+    for up in "${running[@]}"; do
+        [ "$name" = "$up" ] && is_running=1 && break
+    done
+    [ "$is_running" -eq 1 ] || idle+=("$name")
 done
 
-# Both slots running means an earlier swap was interrupted — the deployer was
-# restarted while it waited for the drain. Finish that swap instead of starting
-# a third container: keep whichever slot already runs the new image and retire
-# the rest.
-if [ "${#slots[@]}" -gt 1 ]; then
+if [ "${#all[@]}" -eq 0 ]; then
+    notify "no container carries ${GROUP_LABEL}; the slots have to be seeded first"
+    exit 1
+fi
+
+# Both slots up means an earlier swap was interrupted, most likely the deployer
+# restarting while it waited for a drain. Finish that swap rather than start a
+# third container: keep whichever slot already runs the new image.
+if [ "${#running[@]}" -gt 1 ]; then
     keeper=""
-    for name in "${slots[@]}"; do
+    for name in "${running[@]}"; do
         if [ "$(running_image_id "$name")" = "$new_image_id" ]; then
             keeper="$name"
             break
         fi
     done
-    keeper="${keeper:-${slots[0]}}"
+    keeper="${keeper:-${running[0]}}"
 
-    notify "${#slots[@]} slots running; resuming interrupted swap, keeping ${keeper}"
-    for name in "${slots[@]}"; do
+    notify "${#running[@]} slots running; resuming interrupted swap, keeping ${keeper}"
+    for name in "${running[@]}"; do
         [ "$name" = "$keeper" ] || retire "$name"
     done
     exit 0
 fi
 
-live="${slots[0]:-}"
-
-case "$live" in
-    "$SLOT_A_NAME")
-        target_name="$SLOT_B_NAME"
-        target_port="$SLOT_B_PORT"
-        target_management_port="$SLOT_B_MANAGEMENT_PORT"
-        ;;
-    *)
-        target_name="$SLOT_A_NAME"
-        target_port="$SLOT_A_PORT"
-        target_management_port="$SLOT_A_MANAGEMENT_PORT"
-        ;;
-esac
+live="${running[0]:-}"
 
 if [ -n "$live" ] && [ "$(running_image_id "$live")" = "$new_image_id" ]; then
     log "${live} already runs the current image; nothing to do"
     exit 0
 fi
 
-# --- start the new slot ------------------------------------------------------
-
-notify "starting ${target_name} on port ${target_port}"
-if ! start_slot "$target_name" "$target_port" "$target_management_port"; then
-    notify "could not start ${target_name}; keeping ${live:-none}"
-    exit 1
-fi
-
-if ! wait_healthy "$target_name"; then
-    notify "${target_name} failed to become healthy; keeping ${live:-none}. Last logs:"
-    docker logs --tail 50 "$target_name" 2>&1 || true
-    docker rm -f "$target_name" >/dev/null 2>&1 || true
-    exit 1
-fi
-
-log "${target_name} is healthy and registered"
-
+# With nothing running, bring the group back up in place rather than swapping.
 if [ -z "$live" ]; then
-    notify "${target_name} is live (no previous slot to drain)"
+    target="${idle[0]}"
+    notify "no slot is running; restarting ${target} on the current image"
+    recreate "$target" "$new_image_id" || exit 1
+    wait_healthy "$target" || exit 1
+    notify "${target} is live"
     exit 0
 fi
 
-# --- drain the old slot ------------------------------------------------------
+target=""
+for name in "${idle[@]}"; do
+    [ "$name" = "$live" ] && continue
+    target="$name"
+    break
+done
+
+if [ -z "$target" ]; then
+    notify "${live} is running but has no idle counterpart; seed the second slot first"
+    exit 1
+fi
+
+# --- swap --------------------------------------------------------------------
+
+notify "swapping $(slot_of "$live") -> $(slot_of "$target"): rebuilding ${target}"
+
+if ! recreate "$target" "$new_image_id"; then
+    notify "could not rebuild ${target}; keeping ${live}"
+    exit 1
+fi
+
+if ! wait_healthy "$target"; then
+    notify "${target} failed to become healthy; keeping ${live}. Last logs:"
+    docker logs --tail 50 "$target" 2>&1 || true
+    docker stop -t 10 "$target" >/dev/null 2>&1 || true
+    exit 1
+fi
+
+log "${target} is healthy and registered"
 
 retire "$live"
-notify "swap complete: ${target_name} on port ${target_port}"
+notify "swap complete: ${target} is live, ${live} is stopped and idle"
