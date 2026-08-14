@@ -94,7 +94,10 @@ project does not treat the clones as its own service and remove them.
    `CICD_TOKEN` per environment (a JWT carrying the `WORDONLINE_CICD`
    authority; the dev token is not valid in production).
 2. `docker login ghcr.io` with a token that has `read:packages`. Both the game
-   and deployer images are private.
+   and deployer images are private. The deployer mounts the resulting
+   `~/.docker/config.json`: registry credentials belong to the docker client,
+   not the daemon, so a pull from inside the container is anonymous without it.
+   Set `DOCKER_CONFIG_DIR` in `.env` if that file lives elsewhere.
 3. Point nginx at the four slot hostnames.
 4. Seed the slots for each environment, and hand over from the old container.
 5. `docker compose up -d`
@@ -115,8 +118,12 @@ against the live slot. When they differ:
 4. Wait for it to exit on its own (`DRAIN_TIMEOUT`). If matches outlive that,
    stop it with `STOP_GRACE` seconds of SIGTERM grace.
 
-A swap can run longer than the poll interval; `flock` makes the next tick skip
-rather than start a second swap.
+A swap can run longer than the poll interval, so `swap.sh` takes a lock around
+its whole run and exits 75 if another swap already holds it. The lock is inside
+the script rather than the polling loop because a hand-run swap has to be
+serialised against a scheduled tick too — two at once read each other's
+half-finished work as an interrupted swap and drain the slot the other just
+started.
 
 If both slots are found running — the deployer was restarted mid-drain — the
 one already on the new image is kept and the other is drained, finishing the
@@ -143,6 +150,8 @@ reviving policy some other way.
 ```bash
 docker compose exec ac-game-deployer swap.sh
 ```
+
+Exit 75 means a swap was already running and this one did nothing.
 
 ## Updating the deployer itself
 

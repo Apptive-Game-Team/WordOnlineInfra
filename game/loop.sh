@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 #
-# Polls the registry on an interval and runs the blue/green swap when the image
-# changed. This is the container entrypoint; it replaces watchtower for the
-# game server only.
+# Polls the registry on an interval and runs the swap when the image changed.
+# This is the container entrypoint; it replaces watchtower for the game server.
+#
+# swap.sh takes its own lock, so a tick that lands while a swap is still
+# draining — or while someone runs swap.sh by hand — steps aside on its own.
 
 set -uo pipefail
 
 POLL_INTERVAL="${POLL_INTERVAL:-300}"
-LOCK_FILE=/tmp/game-swap.lock
 
 log() {
     printf '%s [deployer] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*"
@@ -19,16 +20,16 @@ trap 'terminate=1' TERM INT
 log "polling ${IMAGE} every ${POLL_INTERVAL}s"
 
 while [ "$terminate" -eq 0 ]; do
-    # A swap can outlive the poll interval while it waits for matches to end.
-    # flock makes the next tick skip instead of starting a second swap.
-    flock -n "$LOCK_FILE" /usr/local/bin/swap.sh
+    /usr/local/bin/swap.sh
     status=$?
     case "$status" in
         0) ;;
-        1) log "swap failed; will retry next tick" ;;
-        *) log "swap skipped (already running)" ;;
+        75) log "another swap is in progress; skipping this tick" ;;
+        *) log "swap failed; will retry next tick" ;;
     esac
 
+    # Slept a second at a time so `docker stop` does not have to wait out the
+    # whole interval before the trap runs.
     for _ in $(seq "$POLL_INTERVAL"); do
         [ "$terminate" -eq 0 ] || break
         sleep 1

@@ -17,6 +17,17 @@
 
 set -euo pipefail
 
+# Serialise every invocation, not just the polling loop's. A swap runs for as
+# long as a drain takes, so a hand-run `swap.sh` and a scheduled tick overlap
+# easily — and two swaps at once read each other's half-finished work as an
+# interrupted swap and drain the slot the other just started.
+#
+# Exit 75 (EX_TEMPFAIL) means another swap holds the lock.
+LOCK_FILE="${LOCK_FILE:-/tmp/game-swap.lock}"
+if [ "${SWAP_LOCK_HELD:-}" != "1" ]; then
+    exec env SWAP_LOCK_HELD=1 flock -n -E 75 "$LOCK_FILE" "$0" "$@"
+fi
+
 IMAGE="${IMAGE:?IMAGE is required}"
 CICD_TOKEN="${CICD_TOKEN:?CICD_TOKEN is required}"
 
