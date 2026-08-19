@@ -28,8 +28,14 @@ x-deployer: &deployer
     # game image comes back `unauthorized`.
     - ${DOCKER_CONFIG_DIR:-~/.docker}/config.json:/root/.docker/config.json:ro
   labels:
-    # Watchtower must not restart a deployer mid-swap.
-    com.centurylinklabs.watchtower.enable: "false"
+    # Watchtower keeps the deployers themselves up to date. A restart mid-swap is
+    # survivable: the next tick sees both slots running, recognises the swap as
+    # interrupted and finishes it, keeping whichever slot already carries the new
+    # image. The one window that does not self-heal is the instant inside
+    # `recreate` between `docker rm` and the create call — a restart there leaves
+    # the slot missing and its spooled payload gone with the deployer's /tmp, and
+    # the slot has to be recreated from slots/<group>.yml by hand.
+    com.centurylinklabs.watchtower.enable: "true"
 
 x-endpoints: &endpoints
   # Endpoints on the game server, reached over the docker network. Change them
@@ -54,8 +60,10 @@ services:
       POLL_INTERVAL: 300
       HEALTH_TIMEOUT: 300
       # Two lobby refresh ticks (15s each) plus margin, so the new slot is in
-      # rotation before the old one leaves it.
-      SETTLE_DELAY: 30
+      # rotation before the old one leaves it. Overridable from the host .env
+      # because the right value depends on the lobby's refresh interval and on
+      # how fast nginx picks the slot up.
+      SETTLE_DELAY: ${AC_SETTLE_DELAY:-30}
       # Real matches. Wait an hour before taking a slot down by force.
       DRAIN_TIMEOUT: 3600
 
@@ -71,7 +79,7 @@ services:
       # Every push to main lands here, so poll often.
       POLL_INTERVAL: 60
       HEALTH_TIMEOUT: 300
-      SETTLE_DELAY: 30
+      SETTLE_DELAY: ${DEV_SETTLE_DELAY:-30}
       # Test matches. Do not let one hold a deploy up for long.
       DRAIN_TIMEOUT: 300
 

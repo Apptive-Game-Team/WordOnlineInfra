@@ -174,15 +174,24 @@ Exit 75 means a swap was already running and this one did nothing.
 
 ## Updating the deployer itself
 
-Nothing updates it automatically; it is excluded from watchtower and does not
-replace itself. After a new deployer image is pushed:
+Watchtower picks up a new deployer image on its own — the deployers carry
+`com.centurylinklabs.watchtower.enable=true`, and the host's watchtower runs with
+`WATCHTOWER_LABEL_ENABLE=true`, so only labelled containers are touched. The slots
+themselves stay labelled `false`; their image is the deployer's business, not
+watchtower's.
+
+This is safe because restarting a deployer mid-swap only abandons the wait — the
+new slot keeps running, and the next tick sees both slots up, recognises the
+interrupted swap and finishes the drain. The exception is a restart landing inside
+`recreate` between `docker rm` and the create call: the slot is then missing and
+its spooled payload went with the deployer's `/tmp`, so it has to be recreated
+from `slots/<group>.yml`.
+
+To update by hand instead, or after changing this file:
 
 ```bash
 docker compose pull && docker compose up -d
 ```
-
-Safe at any time. Restarting a deployer mid-swap only abandons the wait — the
-new slot keeps running and the next tick finishes the drain.
 
 ## Security
 
