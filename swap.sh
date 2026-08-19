@@ -50,6 +50,19 @@ DRAIN_METHOD="${DRAIN_METHOD:-POST}"
 
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-300}"   # seconds to wait for the new slot
 DRAIN_TIMEOUT="${DRAIN_TIMEOUT:-3600}"    # seconds to wait for matches to end
+
+# Seconds to leave both slots up after the new one reports UP, before the old
+# one is drained.
+#
+# The lobby does not read the Server table to decide availability. It rediscovers
+# the rows and probes each slot's public URL on its own schedule
+# (`gameserver.refresh-interval`, 15s by default), and a slot counts as available
+# only once one of those probes has actually succeeded. Draining the old slot the
+# moment the new one answers on the management port therefore takes the old slot
+# out of rotation before the lobby has had a tick to put the new one in — which
+# is what a match sees as "no available game server". Waiting here spans at least
+# one refresh, so the pool is never empty.
+SETTLE_DELAY="${SETTLE_DELAY:-30}"
 STOP_GRACE="${STOP_GRACE:-30}"            # SIGTERM grace when drain overruns
 DISCORD_WEBHOOK_URL="${DISCORD_WEBHOOK_URL:-}"
 
@@ -312,6 +325,11 @@ if ! wait_healthy "$target"; then
 fi
 
 log "${target} is healthy and registered"
+
+if [ "$SETTLE_DELAY" -gt 0 ]; then
+    log "letting the lobby pick ${target} up; draining ${live} in ${SETTLE_DELAY}s"
+    sleep "$SETTLE_DELAY"
+fi
 
 retire "$live"
 notify "swap complete: ${target} is live, ${live} is stopped and idle"
