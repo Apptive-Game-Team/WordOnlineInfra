@@ -127,9 +127,14 @@ against the live slot. When they differ:
 2. Poll `HEALTH_PATH` over the docker network until the body contains
    `HEALTH_UP_PATTERN` (`HEALTH_TIMEOUT`). On failure the new slot is stopped,
    its last 50 log lines are reported, and the live slot is left alone.
-3. Call `DRAIN_METHOD DRAIN_PATH` on the live slot with the `CICD_TOKEN` as a
+3. Wait `SETTLE_DELAY` seconds with both slots up. The lobby decides
+   availability from its own scheduled probe of each slot's public URL, not from
+   the `Server` table, so the new slot only enters rotation on the lobby's next
+   refresh. Draining without this wait empties the pool and matches fail with
+   "no available game server".
+4. Call `DRAIN_METHOD DRAIN_PATH` on the live slot with the `CICD_TOKEN` as a
    bearer token.
-4. Wait for it to exit on its own (`DRAIN_TIMEOUT`). If matches outlive that,
+5. Wait for it to exit on its own (`DRAIN_TIMEOUT`). If matches outlive that,
    stop it with `STOP_GRACE` seconds of SIGTERM grace.
 
 A swap can run longer than the poll interval, so `swap.sh` takes a lock around

@@ -53,6 +53,9 @@ services:
       DISCORD_WEBHOOK_URL: ${AC_DISCORD_WEBHOOK_URL:-${DISCORD_WEBHOOK_URL:-}}
       POLL_INTERVAL: 300
       HEALTH_TIMEOUT: 300
+      # Two lobby refresh ticks (15s each) plus margin, so the new slot is in
+      # rotation before the old one leaves it.
+      SETTLE_DELAY: 30
       # Real matches. Wait an hour before taking a slot down by force.
       DRAIN_TIMEOUT: 3600
 
@@ -68,6 +71,7 @@ services:
       # Every push to main lands here, so poll often.
       POLL_INTERVAL: 60
       HEALTH_TIMEOUT: 300
+      SETTLE_DELAY: 30
       # Test matches. Do not let one hold a deploy up for long.
       DRAIN_TIMEOUT: 300
 
