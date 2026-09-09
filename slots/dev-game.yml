@@ -36,7 +36,9 @@ services:
       # Each slot registers its own address. Sharing one would put both slots
       # in the same Server row, which the server looks up by domain and port.
       DOMAIN: blue.game.dev.ac.theevilent.com
-      # lobby 가 docker network `net` 으로 붙는 주소. DOMAIN 은 클라이언트가 붙는 주소다.
+      # Where the lobby reaches this slot over the docker network. DOMAIN above is
+      # the address clients connect to; a slot needs both and they are not
+      # interchangeable.
       INTERNAL_BASE_URL: http://dev-game-blue:8080
     labels:
       wordonline.group: dev-game
@@ -48,7 +50,6 @@ services:
     container_name: dev-game-green
     environment:
       DOMAIN: green.game.dev.ac.theevilent.com
-      # lobby 가 docker network `net` 으로 붙는 주소. DOMAIN 은 클라이언트가 붙는 주소다.
       INTERNAL_BASE_URL: http://dev-game-green:8080
     labels:
       wordonline.group: dev-game
