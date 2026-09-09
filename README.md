@@ -44,6 +44,15 @@ slots sharing a hostname cannot overlap: nginx can only route it to one of
 them, and both would write to the same `Server` row, since the server looks its
 row up by domain and port.
 
+Each slot exposes two addresses. The public address — configured via `PROTOCOL`,
+`DOMAIN`, and `EXTERNAL_PORT` — is what the client asks the lobby for. The
+internal address `INTERNAL_BASE_URL` is what the lobby uses to reach the game
+server over the docker network `net`, rather than crossing the public internet.
+Both must be set correctly when creating a new slot. The deployer preserves
+environment variables across redeploys — once set, they follow the container
+to the next version — but already-running containers do not pick up environment
+changes until they are recreated.
+
 ## How a slot is defined
 
 Nowhere in this repository. A slot is defined by its own container.
